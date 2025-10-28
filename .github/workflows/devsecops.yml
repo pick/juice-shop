@@ -27,25 +27,24 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS and save to file in current directory
+      - name: Run 2MS and save output
         continue-on-error: true
         run: |
-          # Create output directory with proper permissions
           mkdir -p results
           chmod 777 results
           
-          # Run 2MS - let it write wherever it wants, capture stdout
-          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --stdout-format json > results/2ms-raw.json || true
+          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --stdout-format json > results/2ms-raw.txt || true
           
-          echo "2MS scan completed"
-          echo "Output file contents:"
-          cat results/2ms-raw.json || echo "No output file"
+          # Remove log lines, keep only JSON (starts with {)
+          grep -A 999999 '^{' results/2ms-raw.txt > results/2ms-clean.json || echo '{"results":{}}' > results/2ms-clean.json
+          
+          echo "Cleaned JSON output:"
+          cat results/2ms-clean.json
       
       - name: Convert to SARIF
         run: |
           cat > convert.py << 'EOF'
           import json
-          import sys
           
           sarif = {
               "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -64,52 +63,55 @@ jobs:
           }
           
           try:
-              with open('results/2ms-raw.json', 'r') as f:
-                  content = f.read().strip()
-                  if content:
-                      data = json.loads(content)
-                      if isinstance(data, list):
-                          for item in data:
-                              rule_id = item.get('Rule', {}).get('RuleID', 'secret-detected')
-                              desc = item.get('Rule', {}).get('Description', 'Secret detected')
-                              file_path = item.get('DetectedValue', {}).get('File', 'unknown')
-                              line = item.get('DetectedValue', {}).get('StartLine', 1)
-                              
-                              # Add rule
-                              if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
-                                  sarif['runs'][0]['tool']['driver']['rules'].append({
-                                      "id": rule_id,
-                                      "name": rule_id,
-                                      "shortDescription": {"text": desc},
-                                      "defaultConfiguration": {"level": "warning"}
-                                  })
-                              
-                              # Add result
-                              sarif['runs'][0]['results'].append({
-                                  "ruleId": rule_id,
-                                  "message": {"text": desc},
-                                  "locations": [{
-                                      "physicalLocation": {
-                                          "artifactLocation": {"uri": file_path},
-                                          "region": {"startLine": line}
-                                      }
-                                  }],
-                                  "level": "warning"
+              with open('results/2ms-clean.json', 'r') as f:
+                  data = json.load(f)
+                  
+                  results = data.get('results', {})
+                  
+                  for commit_hash, findings in results.items():
+                      for finding in findings:
+                          rule_id = finding.get('ruleId', 'secret-detected')
+                          source = finding.get('source', 'unknown')
+                          start_line = finding.get('startLine', 1)
+                          value = finding.get('value', 'redacted')
+                          
+                          # Extract file path from source
+                          file_path = source.split(':')[-1] if ':' in source else 'unknown'
+                          
+                          # Add rule if not exists
+                          if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
+                              sarif['runs'][0]['tool']['driver']['rules'].append({
+                                  "id": rule_id,
+                                  "name": rule_id,
+                                  "shortDescription": {"text": f"Detected {rule_id}"},
+                                  "defaultConfiguration": {"level": "warning"}
                               })
-                      print(f"Converted {len(sarif['runs'][0]['results'])} findings")
+                          
+                          # Add result
+                          sarif['runs'][0]['results'].append({
+                              "ruleId": rule_id,
+                              "message": {"text": f"Found {rule_id} in {file_path}"},
+                              "locations": [{
+                                  "physicalLocation": {
+                                      "artifactLocation": {"uri": file_path},
+                                      "region": {"startLine": max(1, start_line)}
+                                  }
+                              }],
+                              "level": "warning"
+                          })
+                  
+                  print(f"✅ Converted {len(sarif['runs'][0]['results'])} findings to SARIF")
+                  
           except Exception as e:
-              print(f"Conversion issue: {e}")
+              print(f"Error: {e}")
+              import traceback
+              traceback.print_exc()
           
           with open('2ms-results.sarif', 'w') as f:
               json.dump(sarif, f, indent=2)
-          
-          print("SARIF file created")
           EOF
           
           python3 convert.py
-          
-          echo "Final SARIF:"
-          cat 2ms-results.sarif
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
