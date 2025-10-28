@@ -27,49 +27,89 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS Scan
+      - name: Run 2MS and save to file in current directory
         continue-on-error: true
         run: |
-          # Redirect only stdout (SARIF), stderr goes to console
-          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo \
-            --stdout-format sarif 2>/dev/null > 2ms-output.txt || true
+          # Create output directory with proper permissions
+          mkdir -p results
+          chmod 777 results
           
-          # Check if output is valid JSON/SARIF
-          if [ -f 2ms-output.txt ] && [ -s 2ms-output.txt ]; then
-            # Try to validate it's JSON
-            if jq empty 2ms-output.txt 2>/dev/null; then
-              mv 2ms-output.txt 2ms-results.sarif
-              echo "✅ Valid SARIF created"
-            else
-              echo "⚠️ Output is not valid JSON, creating empty SARIF"
-              rm -f 2ms-output.txt
-            fi
-          fi
+          # Run 2MS - let it write wherever it wants, capture stdout
+          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --stdout-format json > results/2ms-raw.json || true
+          
+          echo "2MS scan completed"
+          echo "Output file contents:"
+          cat results/2ms-raw.json || echo "No output file"
       
-      - name: Create SARIF if Missing
+      - name: Convert to SARIF
         run: |
-          if [ ! -f 2ms-results.sarif ]; then
-            echo "Creating empty SARIF file"
-            cat > 2ms-results.sarif << 'EOF'
-          {
-            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            "version": "2.1.0",
-            "runs": [{
-              "tool": {
-                "driver": {
-                  "name": "2MS",
-                  "informationUri": "https://checkmarx.com/product/2ms/",
-                  "version": "2.8.1"
-                }
-              },
-              "results": []
-            }]
-          }
-          EOF
-          fi
+          cat > convert.py << 'EOF'
+          import json
+          import sys
           
-          echo "Final SARIF file:"
-          cat 2ms-results.sarif | head -30
+          sarif = {
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [{
+                  "tool": {
+                      "driver": {
+                          "name": "2MS",
+                          "informationUri": "https://checkmarx.com/product/2ms/",
+                          "version": "2.8.1",
+                          "rules": []
+                      }
+                  },
+                  "results": []
+              }]
+          }
+          
+          try:
+              with open('results/2ms-raw.json', 'r') as f:
+                  content = f.read().strip()
+                  if content:
+                      data = json.loads(content)
+                      if isinstance(data, list):
+                          for item in data:
+                              rule_id = item.get('Rule', {}).get('RuleID', 'secret-detected')
+                              desc = item.get('Rule', {}).get('Description', 'Secret detected')
+                              file_path = item.get('DetectedValue', {}).get('File', 'unknown')
+                              line = item.get('DetectedValue', {}).get('StartLine', 1)
+                              
+                              # Add rule
+                              if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
+                                  sarif['runs'][0]['tool']['driver']['rules'].append({
+                                      "id": rule_id,
+                                      "name": rule_id,
+                                      "shortDescription": {"text": desc},
+                                      "defaultConfiguration": {"level": "warning"}
+                                  })
+                              
+                              # Add result
+                              sarif['runs'][0]['results'].append({
+                                  "ruleId": rule_id,
+                                  "message": {"text": desc},
+                                  "locations": [{
+                                      "physicalLocation": {
+                                          "artifactLocation": {"uri": file_path},
+                                          "region": {"startLine": line}
+                                      }
+                                  }],
+                                  "level": "warning"
+                              })
+                      print(f"Converted {len(sarif['runs'][0]['results'])} findings")
+          except Exception as e:
+              print(f"Conversion issue: {e}")
+          
+          with open('2ms-results.sarif', 'w') as f:
+              json.dump(sarif, f, indent=2)
+          
+          print("SARIF file created")
+          EOF
+          
+          python3 convert.py
+          
+          echo "Final SARIF:"
+          cat 2ms-results.sarif
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
@@ -77,13 +117,6 @@ jobs:
         with:
           sarif_file: 2ms-results.sarif
           category: 2ms
-      
-      - name: Upload Results as Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: 2ms-scan-results
-          path: 2ms-results.sarif
 
   build-and-push:
     name: Build and Push to GHCR
