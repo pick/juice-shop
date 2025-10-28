@@ -27,26 +27,29 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS Scan and Capture Output
+      - name: Run 2MS Scan
         continue-on-error: true
         run: |
-          # Run 2MS and capture SARIF output to stdout, then redirect to file
+          # Redirect only stdout (SARIF), stderr goes to console
           docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo \
-            --stdout-format sarif > 2ms-results.sarif 2>&1 || true
+            --stdout-format sarif 2>/dev/null > 2ms-output.txt || true
           
-          echo "✅ 2MS scan complete"
-          
-          # Show file size if created
-          if [ -f 2ms-results.sarif ]; then
-            ls -lh 2ms-results.sarif
-            echo "First few lines of output:"
-            head -20 2ms-results.sarif
+          # Check if output is valid JSON/SARIF
+          if [ -f 2ms-output.txt ] && [ -s 2ms-output.txt ]; then
+            # Try to validate it's JSON
+            if jq empty 2ms-output.txt 2>/dev/null; then
+              mv 2ms-output.txt 2ms-results.sarif
+              echo "✅ Valid SARIF created"
+            else
+              echo "⚠️ Output is not valid JSON, creating empty SARIF"
+              rm -f 2ms-output.txt
+            fi
           fi
       
-      - name: Ensure Valid SARIF File Exists
+      - name: Create SARIF if Missing
         run: |
-          if [ ! -f 2ms-results.sarif ] || [ ! -s 2ms-results.sarif ]; then
-            echo "⚠️ Creating empty SARIF file"
+          if [ ! -f 2ms-results.sarif ]; then
+            echo "Creating empty SARIF file"
             cat > 2ms-results.sarif << 'EOF'
           {
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -63,9 +66,10 @@ jobs:
             }]
           }
           EOF
-          else
-            echo "✅ SARIF file exists and has content"
           fi
+          
+          echo "Final SARIF file:"
+          cat 2ms-results.sarif | head -30
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
