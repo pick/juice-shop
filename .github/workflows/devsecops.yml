@@ -27,22 +27,26 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS Scan
+      - name: Run 2MS Scan and Capture Output
         continue-on-error: true
         run: |
+          # Run 2MS and capture SARIF output to stdout, then redirect to file
           docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo \
-            --report-path /repo/2ms-results.sarif \
-            --stdout-format sarif || true
+            --stdout-format sarif > 2ms-results.sarif 2>&1 || true
           
           echo "✅ 2MS scan complete"
-      
-      - name: Check if SARIF exists
-        run: |
+          
+          # Show file size if created
           if [ -f 2ms-results.sarif ]; then
-            echo "✅ SARIF file created"
             ls -lh 2ms-results.sarif
-          else
-            echo "⚠️ No SARIF file - creating empty one"
+            echo "First few lines of output:"
+            head -20 2ms-results.sarif
+          fi
+      
+      - name: Ensure Valid SARIF File Exists
+        run: |
+          if [ ! -f 2ms-results.sarif ] || [ ! -s 2ms-results.sarif ]; then
+            echo "⚠️ Creating empty SARIF file"
             cat > 2ms-results.sarif << 'EOF'
           {
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -59,6 +63,8 @@ jobs:
             }]
           }
           EOF
+          else
+            echo "✅ SARIF file exists and has content"
           fi
       
       - name: Upload 2MS SARIF to Code Scanning
