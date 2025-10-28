@@ -47,6 +47,17 @@ jobs:
           
           echo "Gitleaks scan complete"
       
+      - name: Fix SARIF endColumn Issues
+        if: always()
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Remove startColumn and endColumn which cause validation errors
+          jq 'del(.runs[].results[].locations[].physicalLocation.region.startColumn, .runs[].results[].locations[].physicalLocation.region.endColumn)' gitleaks.sarif > gitleaks-fixed.sarif
+          
+          mv gitleaks-fixed.sarif gitleaks.sarif
+          echo "✅ SARIF file fixed"
+      
       - name: Upload Gitleaks SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
