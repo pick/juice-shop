@@ -226,7 +226,7 @@ jobs:
     name: AI Security Analysis
     runs-on: ubuntu-latest
     needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: always()
     permissions:
       contents: read
       security-events: write
@@ -242,9 +242,9 @@ jobs:
       - name: Install dependencies
         run: pip install anthropic
       
-      - name: Create AI analysis script
+      - name: Create analysis script file
         run: |
-          cat > analyze.py << 'EOF'
+          cat > /tmp/analyze.py << 'ENDOFPYTHON'
           import anthropic
           import os
           import json
@@ -252,9 +252,9 @@ jobs:
           
           api_key = os.environ.get("ANTHROPIC_API_KEY")
           if not api_key:
-              print("No API key")
+              print("No API key configured")
               with open('AI_SECURITY_REPORT.md', 'w') as f:
-                  f.write("# AI Security Analysis\n\nAPI key not configured")
+                  f.write("AI Security Analysis - API key not configured")
               exit(0)
           
           client = anthropic.Anthropic(api_key=api_key)
@@ -301,105 +301,95 @@ jobs:
                           else:
                               medium_alerts.append(finding)
               except Exception as e:
-                  print("Error processing file: " + str(e))
+                  print("Error: " + str(e))
           
-          print("Total findings: " + str(len(all_findings)))
+          print("Total: " + str(len(all_findings)))
           print("Critical: " + str(len(critical_alerts)))
           print("High: " + str(len(high_alerts)))
-          print("Medium: " + str(len(medium_alerts)))
           
           critical_json = json.dumps(critical_alerts[:10], indent=2)
           high_json = json.dumps(high_alerts[:10], indent=2)
           tools_list = ', '.join(all_tools)
           
-          summary = "SECURITY SCAN COMPLETE\n\n"
+          summary = "SECURITY SCAN RESULTS\n\n"
           summary += "Total Findings: " + str(len(all_findings)) + "\n"
           summary += "Critical: " + str(len(critical_alerts)) + "\n"
           summary += "High: " + str(len(high_alerts)) + "\n"
           summary += "Medium: " + str(len(medium_alerts)) + "\n\n"
-          summary += "Tools Used: " + tools_list + "\n\n"
-          summary += "Top Critical Issues:\n" + critical_json + "\n\n"
-          summary += "Top High Severity Issues:\n" + high_json
+          summary += "Tools: " + tools_list + "\n\n"
+          summary += "Top Critical:\n" + critical_json + "\n\n"
+          summary += "Top High:\n" + high_json
           
-          prompt = summary + """\n\nYou are a senior security engineer presenting findings to executives.
-
-Provide a comprehensive security analysis with:
-
-1. EXECUTIVE SUMMARY - 3 sentences on overall security posture and risk level
-2. CRITICAL FINDINGS - Top 5 most dangerous vulnerabilities that need immediate fixing
-3. RISK SCORE - Rate 1-10 with clear justification
-4. FALSE POSITIVE ANALYSIS - Which findings are likely false positives and why
-5. REMEDIATION ROADMAP - Prioritized 30/60/90 day plan
-6. RECOMMENDATIONS - 5 actionable security improvements
-
-Be direct, specific, and interview-ready. This will be shown to hiring managers."""
+          instruction = "You are a senior security engineer. Analyze these security findings and provide:\n\n"
+          instruction += "EXECUTIVE SUMMARY - Three sentences on overall security posture\n"
+          instruction += "CRITICAL FINDINGS - Top 5 dangerous vulnerabilities needing immediate action\n"
+          instruction += "RISK SCORE - Rate 1 to 10 with justification\n"
+          instruction += "FALSE POSITIVES - Identify likely false positives and why\n"
+          instruction += "REMEDIATION PLAN - Prioritized 30/60/90 day roadmap\n"
+          instruction += "RECOMMENDATIONS - Five actionable improvements\n\n"
+          instruction += "Be direct and interview-ready.\n\n"
+          instruction += "Scan Results:\n"
+          
+          full_prompt = instruction + summary
           
           message = client.messages.create(
               model="claude-3-7-sonnet-20250219",
               max_tokens=3500,
-              messages=[{"role": "user", "content": prompt}]
+              messages=[{"role": "user", "content": full_prompt}]
           )
           
           analysis = message.content[0].text
           
           report = "# AI-Powered Security Analysis Report\n\n"
-          report += "**Generated:** " + str(os.environ.get('GITHUB_SHA', 'unknown'))[:7] + "\n\n"
-          report += "---\n\n"
           report += analysis + "\n\n"
           report += "---\n\n"
-          report += "## Detailed Statistics\n\n"
-          report += "### Findings by Severity\n"
-          report += "- 🔴 **Critical:** " + str(len(critical_alerts)) + "\n"
-          report += "- 🟠 **High:** " + str(len(high_alerts)) + "\n"
-          report += "- 🟡 **Medium:** " + str(len(medium_alerts)) + "\n\n"
-          report += "### Findings by Tool\n"
+          report += "## Statistics\n\n"
+          report += "### By Severity\n"
+          report += "- Critical: " + str(len(critical_alerts)) + "\n"
+          report += "- High: " + str(len(high_alerts)) + "\n"
+          report += "- Medium: " + str(len(medium_alerts)) + "\n\n"
           
           tool_counts = {}
           for finding in all_findings:
               tool = finding['tool']
               tool_counts[tool] = tool_counts.get(tool, 0) + 1
           
+          report += "### By Tool\n"
           for tool, count in sorted(tool_counts.items(), key=lambda x: x[1], reverse=True):
-              report += "- **" + tool + ":** " + str(count) + " findings\n"
+              report += "- " + tool + ": " + str(count) + "\n"
           
-          report += "\n### Security Tools Used\n"
-          report += "- **CodeQL** - GitHub's semantic code analysis engine\n"
-          report += "- **Semgrep** - Fast pattern-based static analysis\n"
-          report += "- **Trivy** - Comprehensive container vulnerability scanner\n"
-          report += "- **2MS (Too Many Secrets)** - Secret detection by Checkmarx\n\n"
-          report += "---\n\n"
-          report += "*AI-powered analysis generated by Claude 3.7 Sonnet*\n"
-          report += "*This report was created using advanced AI to analyze and prioritize security findings*\n"
+          report += "\n### Tools Used\n"
+          report += "- CodeQL - Semantic analysis\n"
+          report += "- Semgrep - Pattern matching\n"
+          report += "- Trivy - Container scanning\n"
+          report += "- 2MS - Secret detection\n\n"
+          report += "---\n"
+          report += "AI analysis by Claude 3.7 Sonnet\n"
           
           with open('AI_SECURITY_REPORT.md', 'w') as f:
               f.write(report)
           
-          print("\n" + "="*80)
-          print(report)
-          print("="*80)
-          EOF
+          print("Report generated successfully")
+          ENDOFPYTHON
       
-      - name: Run AI Security Analysis
+      - name: Run AI Analysis
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python3 analyze.py
+        run: python3 /tmp/analyze.py
       
-      - name: Upload AI Security Report
+      - name: Upload AI Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ai-security-analysis-report
           path: AI_SECURITY_REPORT.md
       
-      - name: Display Report Summary
+      - name: Display Summary
         if: always()
         run: |
           echo "=========================================="
           echo "AI SECURITY ANALYSIS COMPLETE"
           echo "=========================================="
-          echo ""
-          echo "Download the full report from the Artifacts section"
-          echo ""
           if [ -f AI_SECURITY_REPORT.md ]; then
-            head -50 AI_SECURITY_REPORT.md
+            head -100 AI_SECURITY_REPORT.md
           fi
