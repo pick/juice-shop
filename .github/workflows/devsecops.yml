@@ -32,14 +32,12 @@ jobs:
         run: |
           mkdir -p results
           chmod 777 results
-          
           docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --stdout-format json > results/2ms-raw.txt || true
-          
           grep -A 999999 '^{' results/2ms-raw.txt > results/2ms-clean.json || echo '{"results":{}}' > results/2ms-clean.json
       
       - name: Convert to SARIF
         run: |
-          cat > convert.py << 'EOF'
+          python3 << 'PYTHON_SCRIPT'
           import json
           
           sarif = {
@@ -61,7 +59,6 @@ jobs:
           try:
               with open('results/2ms-clean.json', 'r') as f:
                   data = json.load(f)
-                  
                   results = data.get('results', {})
                   
                   for commit_hash, findings in results.items():
@@ -69,7 +66,6 @@ jobs:
                           rule_id = finding.get('ruleId', 'secret-detected')
                           source = finding.get('source', 'unknown')
                           start_line = finding.get('startLine', 1)
-                          
                           file_path = source.split(':')[-1] if ':' in source else 'unknown'
                           
                           if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
@@ -92,16 +88,13 @@ jobs:
                               "level": "warning"
                           })
                   
-                  print(f"✅ Converted {len(sarif['runs'][0]['results'])} findings to SARIF")
-                  
+                  print(f"Converted {len(sarif['runs'][0]['results'])} findings to SARIF")
           except Exception as e:
               print(f"Error: {e}")
           
           with open('2ms-results.sarif', 'w') as f:
               json.dump(sarif, f, indent=2)
-          EOF
-          
-          python3 convert.py
+          PYTHON_SCRIPT
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
@@ -228,9 +221,6 @@ jobs:
       
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
-        with:
-          upload: true
-          output: codeql-results
 
   ai-sarif-analyzer:
     name: AI-Powered Security Analysis
@@ -251,14 +241,13 @@ jobs:
           path: sarif-results
       
       - name: Install AI Analysis Tools
-        run: |
-          pip install anthropic
+        run: pip install anthropic
       
       - name: Aggregate and Analyze Findings
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          cat > intelligent_analysis.py << 'EOF'
+          python3 << 'PYEOF'
           import anthropic
           import os
           import json
@@ -267,7 +256,6 @@ jobs:
           
           client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
           
-          # Aggregate all findings
           all_findings = defaultdict(list)
           severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
           
@@ -293,7 +281,6 @@ jobs:
                               'file': file_path
                           })
                           
-                          # Count severities
                           if 'error' in level or 'critical' in level.lower():
                               severity_counts['critical'] += 1
                           elif 'warning' in level or 'high' in level.lower():
@@ -303,35 +290,32 @@ jobs:
               except Exception as e:
                   print(f"Error processing {sarif_file}: {e}")
           
-          # Prepare summary for AI
-          summary = f"""
-          ## Security Scan Summary
+          summary = f"""Security Scan Summary
           
-          **Total Findings by Tool:**
+          Total Findings by Tool:
           {json.dumps({tool: len(findings) for tool, findings in all_findings.items()}, indent=2)}
           
-          **Severity Distribution:**
+          Severity Distribution:
           - Critical: {severity_counts['critical']}
           - High: {severity_counts['high']}
           - Medium: {severity_counts['medium']}
           - Low: {severity_counts['low']}
           
-          **Sample Findings (first 10):**
+          Sample Findings (first 10):
           {json.dumps(list(all_findings.values())[0][:10] if all_findings else [], indent=2)}
           """
           
           prompt = f"""{summary}
 
-As an expert security analyst, provide:
-
-1. **Executive Summary** (2-3 sentences on overall security posture)
-2. **Priority Fixes** (Top 5 issues to address immediately with clear reasoning)
-3. **Risk Score** (1-10 scale with justification)
-4. **False Positive Assessment** (Identify potential false positives)
-5. **Remediation Roadmap** (30/60/90 day plan)
-6. **Best Practices** (3 recommendations for this codebase)
-
-Be specific, actionable, and interview-ready."""
+          As an expert security analyst, provide:
+          1. Executive Summary (2-3 sentences on overall security posture)
+          2. Priority Fixes (Top 5 issues to address immediately with clear reasoning)
+          3. Risk Score (1-10 scale with justification)
+          4. False Positive Assessment (Identify potential false positives)
+          5. Remediation Roadmap (30/60/90 day plan)
+          6. Best Practices (3 recommendations for this codebase)
+          
+          Be specific, actionable, and interview-ready."""
           
           message = client.messages.create(
               model="claude-3-5-sonnet-20241022",
@@ -341,37 +325,34 @@ Be specific, actionable, and interview-ready."""
           
           analysis = message.content[0].text
           
-          # Generate markdown report
-          report = f"""# 🛡️ AI-Powered Security Analysis Report
+          report = f"""# AI-Powered Security Analysis Report
           
-{analysis}
-
----
-
-## Detailed Findings
-
-**Total Issues:** {sum(len(f) for f in all_findings.values())}
-
-### By Tool:
-{chr(10).join([f"- **{tool}**: {len(findings)} findings" for tool, findings in all_findings.items()])}
-
-### Severity Breakdown:
-- 🔴 Critical: {severity_counts['critical']}
-- 🟠 High: {severity_counts['high']}
-- 🟡 Medium: {severity_counts['medium']}
-- 🟢 Low: {severity_counts['low']}
-
----
-*Report generated by Claude AI*
-"""
+          {analysis}
+          
+          ---
+          
+          ## Detailed Findings
+          
+          **Total Issues:** {sum(len(f) for f in all_findings.values())}
+          
+          ### By Tool:
+          {chr(10).join([f"- **{tool}**: {len(findings)} findings" for tool, findings in all_findings.items()])}
+          
+          ### Severity Breakdown:
+          - Critical: {severity_counts['critical']}
+          - High: {severity_counts['high']}
+          - Medium: {severity_counts['medium']}
+          - Low: {severity_counts['low']}
+          
+          ---
+          *Report generated by Claude AI*
+          """
           
           with open('AI_SECURITY_REPORT.md', 'w') as f:
               f.write(report)
           
           print(report)
-          EOF
-          
-          python intelligent_analysis.py
+          PYEOF
       
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -380,7 +361,6 @@ Be specific, actionable, and interview-ready."""
           script: |
             const fs = require('fs');
             const report = fs.readFileSync('AI_SECURITY_REPORT.md', 'utf8');
-            
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
