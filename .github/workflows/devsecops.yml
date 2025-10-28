@@ -27,10 +27,55 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: TruffleHog OSS
-        uses: trufflesecurity/trufflehog@main
+      - name: Install TruffleHog
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          trufflehog --version
+      
+      - name: Scan Git History
+        continue-on-error: true
+        run: |
+          echo "=== Scanning Git History ==="
+          trufflehog git file://. --json --no-verification > git-secrets.json || true
+          echo "Found $(cat git-secrets.json | wc -l) potential secrets in git history"
+          if [ -s git-secrets.json ]; then
+            echo "Secrets found:"
+            cat git-secrets.json | head -20
+          else
+            echo "No secrets detected in git history"
+          fi
+      
+      - name: Scan Filesystem
+        continue-on-error: true
+        run: |
+          echo "=== Scanning Current Filesystem ==="
+          trufflehog filesystem . --json --no-verification > filesystem-secrets.json || true
+          echo "Found $(cat filesystem-secrets.json | wc -l) potential secrets in filesystem"
+          if [ -s filesystem-secrets.json ]; then
+            echo "Secrets found:"
+            cat filesystem-secrets.json | head -20
+          else
+            echo "No secrets detected in filesystem"
+          fi
+      
+      - name: Upload Scan Results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          extra_args: --only-verified
+          name: trufflehog-scan-results
+          path: |
+            git-secrets.json
+            filesystem-secrets.json
+      
+      - name: Fail if secrets found
+        run: |
+          total_secrets=$(($(cat git-secrets.json 2>/dev/null | wc -l) + $(cat filesystem-secrets.json 2>/dev/null | wc -l)))
+          if [ $total_secrets -gt 0 ]; then
+            echo "⚠️ Found $total_secrets secrets!"
+            exit 1
+          else
+            echo "✅ No secrets found"
+          fi
 
   build-and-push:
     name: Build and Push to GHCR
