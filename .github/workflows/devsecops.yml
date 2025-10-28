@@ -30,87 +30,36 @@ jobs:
       - name: Run 2MS Scan
         continue-on-error: true
         run: |
-          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --report-path /repo/2ms-results.json --report-format json --exit-code 0 || true
+          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo \
+            --report-path /repo/2ms-results.sarif \
+            --stdout-format sarif || true
           
           echo "✅ 2MS scan complete"
       
-      - name: Check if results exist
-        id: check_results
+      - name: Check if SARIF exists
         run: |
-          if [ -f 2ms-results.json ]; then
-            echo "results_exist=true" >> $GITHUB_OUTPUT
-            echo "Results file found"
+          if [ -f 2ms-results.sarif ]; then
+            echo "✅ SARIF file created"
+            ls -lh 2ms-results.sarif
           else
-            echo "results_exist=false" >> $GITHUB_OUTPUT
-            echo "No results file found"
-          fi
-      
-      - name: Convert 2MS JSON to SARIF
-        if: steps.check_results.outputs.results_exist == 'true'
-        run: |
-          cat > convert_to_sarif.py << 'EOF'
-          import json
-          
-          sarif = {
-              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-              "version": "2.1.0",
-              "runs": [{
-                  "tool": {
-                      "driver": {
-                          "name": "2MS",
-                          "informationUri": "https://checkmarx.com/product/2ms/",
-                          "version": "2.8.1",
-                          "rules": []
-                      }
-                  },
-                  "results": []
-              }]
+            echo "⚠️ No SARIF file - creating empty one"
+            cat > 2ms-results.sarif << 'EOF'
+          {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "2MS",
+                  "informationUri": "https://checkmarx.com/product/2ms/",
+                  "version": "2.8.1"
+                }
+              },
+              "results": []
+            }]
           }
-          
-          try:
-              with open('2ms-results.json', 'r') as f:
-                  content = f.read().strip()
-                  if not content or content == '[]':
-                      print("No secrets found")
-                  else:
-                      results = json.loads(content)
-                      
-                      for item in results:
-                          rule_id = item.get('rule', {}).get('id', 'unknown-secret')
-                          description = item.get('rule', {}).get('description', 'Secret detected')
-                          file_path = item.get('file', 'unknown')
-                          line_number = item.get('line', 1)
-                          
-                          if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
-                              sarif['runs'][0]['tool']['driver']['rules'].append({
-                                  "id": rule_id,
-                                  "name": rule_id,
-                                  "shortDescription": {"text": description},
-                                  "fullDescription": {"text": f"2MS detected: {description}"},
-                                  "defaultConfiguration": {"level": "warning"}
-                              })
-                          
-                          sarif['runs'][0]['results'].append({
-                              "ruleId": rule_id,
-                              "message": {"text": description},
-                              "locations": [{
-                                  "physicalLocation": {
-                                      "artifactLocation": {"uri": file_path},
-                                      "region": {"startLine": line_number}
-                                  }
-                              }],
-                              "level": "warning"
-                          })
-          except Exception as e:
-              print(f"Error processing results: {e}")
-          
-          with open('2ms-results.sarif', 'w') as f:
-              json.dump(sarif, f, indent=2)
-          
-          print("✅ SARIF conversion complete")
           EOF
-          
-          python3 convert_to_sarif.py
+          fi
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
@@ -124,9 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: 2ms-scan-results
-          path: |
-            2ms-results.json
-            2ms-results.sarif
+          path: 2ms-results.sarif
 
   build-and-push:
     name: Build and Push to GHCR
