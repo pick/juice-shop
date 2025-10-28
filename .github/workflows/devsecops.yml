@@ -222,15 +222,14 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-  ai-pr-review:
-    name: AI PR Security Review
+  ai-security-analysis:
+    name: AI Security Analysis
     runs-on: ubuntu-latest
     needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      pull-requests: write
-      security-events: read
+      security-events: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -254,8 +253,8 @@ jobs:
           api_key = os.environ.get("ANTHROPIC_API_KEY")
           if not api_key:
               print("No API key")
-              with open('pr_security_review.md', 'w') as f:
-                  f.write("AI Security Review\n\nAPI key not configured")
+              with open('AI_SECURITY_REPORT.md', 'w') as f:
+                  f.write("# AI Security Analysis\n\nAPI key not configured")
               exit(0)
           
           client = anthropic.Anthropic(api_key=api_key)
@@ -263,6 +262,7 @@ jobs:
           critical_alerts = []
           high_alerts = []
           medium_alerts = []
+          all_findings = []
           all_tools = set()
           
           for sarif_file in glob.glob("sarif-results/**/*.sarif", recursive=True):
@@ -273,7 +273,7 @@ jobs:
                       all_tools.add(tool)
                       results = data['runs'][0].get('results', [])
                       
-                      for result in results[:30]:
+                      for result in results[:50]:
                           rule_id = result.get('ruleId', 'unknown')
                           message = result.get('message', {}).get('text', '')
                           level = result.get('level', 'warning')
@@ -283,215 +283,123 @@ jobs:
                           file_path = phys_loc.get('artifactLocation', {}).get('uri', 'unknown')
                           line = phys_loc.get('region', {}).get('startLine', 0)
                           
-                          alert_info = {
+                          finding = {
                               "tool": tool,
                               "rule": rule_id,
-                              "message": message[:100],
-                              "file": file_path + ":" + str(line)
+                              "message": message[:150],
+                              "file": file_path,
+                              "line": line,
+                              "severity": level
                           }
                           
+                          all_findings.append(finding)
+                          
                           if 'error' in level or 'critical' in level.lower():
-                              critical_alerts.append(alert_info)
+                              critical_alerts.append(finding)
                           elif 'warning' in level or 'high' in level.lower():
-                              high_alerts.append(alert_info)
+                              high_alerts.append(finding)
                           else:
-                              medium_alerts.append(alert_info)
+                              medium_alerts.append(finding)
               except Exception as e:
-                  print("Error: " + str(e))
+                  print("Error processing file: " + str(e))
           
-          critical_json = json.dumps(critical_alerts[:5], indent=2)
-          high_json = json.dumps(high_alerts[:5], indent=2)
+          print("Total findings: " + str(len(all_findings)))
+          print("Critical: " + str(len(critical_alerts)))
+          print("High: " + str(len(high_alerts)))
+          print("Medium: " + str(len(medium_alerts)))
+          
+          critical_json = json.dumps(critical_alerts[:10], indent=2)
+          high_json = json.dumps(high_alerts[:10], indent=2)
           tools_list = ', '.join(all_tools)
           
-          summary = "Security Scan Results\n\n"
+          summary = "SECURITY SCAN COMPLETE\n\n"
+          summary += "Total Findings: " + str(len(all_findings)) + "\n"
           summary += "Critical: " + str(len(critical_alerts)) + "\n"
-          summary += critical_json + "\n\n"
           summary += "High: " + str(len(high_alerts)) + "\n"
-          summary += high_json + "\n\n"
-          summary += "Medium: " + str(len(medium_alerts)) + "\n"
-          summary += "Total: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n"
-          summary += "Tools: " + tools_list
+          summary += "Medium: " + str(len(medium_alerts)) + "\n\n"
+          summary += "Tools Used: " + tools_list + "\n\n"
+          summary += "Top Critical Issues:\n" + critical_json + "\n\n"
+          summary += "Top High Severity Issues:\n" + high_json
           
-          prompt = summary + "\n\nProvide a security review with: Executive Summary, Must-Fix items, Recommendations, False Positives, and Merge decision."
+          prompt = summary + """\n\nYou are a senior security engineer presenting findings to executives.
+
+Provide a comprehensive security analysis with:
+
+1. EXECUTIVE SUMMARY - 3 sentences on overall security posture and risk level
+2. CRITICAL FINDINGS - Top 5 most dangerous vulnerabilities that need immediate fixing
+3. RISK SCORE - Rate 1-10 with clear justification
+4. FALSE POSITIVE ANALYSIS - Which findings are likely false positives and why
+5. REMEDIATION ROADMAP - Prioritized 30/60/90 day plan
+6. RECOMMENDATIONS - 5 actionable security improvements
+
+Be direct, specific, and interview-ready. This will be shown to hiring managers."""
           
           message = client.messages.create(
               model="claude-3-7-sonnet-20250219",
-              max_tokens=2000,
+              max_tokens=3500,
               messages=[{"role": "user", "content": prompt}]
           )
           
           analysis = message.content[0].text
           
-          pr_comment = "## AI Security Review\n\n"
-          pr_comment += analysis + "\n\n---\n\n"
-          pr_comment += "### Scan Summary\n"
-          pr_comment += "- Critical: " + str(len(critical_alerts)) + "\n"
-          pr_comment += "- High: " + str(len(high_alerts)) + "\n"
-          pr_comment += "- Medium: " + str(len(medium_alerts)) + "\n"
-          pr_comment += "- Total: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n\n"
-          pr_comment += "### Tools: CodeQL, Semgrep, Trivy, 2MS\n\n"
-          pr_comment += "---\n*AI analysis by Claude 3.7*\n"
+          report = "# AI-Powered Security Analysis Report\n\n"
+          report += "**Generated:** " + str(os.environ.get('GITHUB_SHA', 'unknown'))[:7] + "\n\n"
+          report += "---\n\n"
+          report += analysis + "\n\n"
+          report += "---\n\n"
+          report += "## Detailed Statistics\n\n"
+          report += "### Findings by Severity\n"
+          report += "- 🔴 **Critical:** " + str(len(critical_alerts)) + "\n"
+          report += "- 🟠 **High:** " + str(len(high_alerts)) + "\n"
+          report += "- 🟡 **Medium:** " + str(len(medium_alerts)) + "\n\n"
+          report += "### Findings by Tool\n"
           
-          with open('pr_security_review.md', 'w') as f:
-              f.write(pr_comment)
+          tool_counts = {}
+          for finding in all_findings:
+              tool = finding['tool']
+              tool_counts[tool] = tool_counts.get(tool, 0) + 1
           
-          print(pr_comment)
+          for tool, count in sorted(tool_counts.items(), key=lambda x: x[1], reverse=True):
+              report += "- **" + tool + ":** " + str(count) + " findings\n"
+          
+          report += "\n### Security Tools Used\n"
+          report += "- **CodeQL** - GitHub's semantic code analysis engine\n"
+          report += "- **Semgrep** - Fast pattern-based static analysis\n"
+          report += "- **Trivy** - Comprehensive container vulnerability scanner\n"
+          report += "- **2MS (Too Many Secrets)** - Secret detection by Checkmarx\n\n"
+          report += "---\n\n"
+          report += "*AI-powered analysis generated by Claude 3.7 Sonnet*\n"
+          report += "*This report was created using advanced AI to analyze and prioritize security findings*\n"
+          
+          with open('AI_SECURITY_REPORT.md', 'w') as f:
+              f.write(report)
+          
+          print("\n" + "="*80)
+          print(report)
+          print("="*80)
           EOF
       
-      - name: Run AI analysis
+      - name: Run AI Security Analysis
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 analyze.py
       
-      - name: Post PR Review Comment
-        uses: actions/github-script@v7
+      - name: Upload AI Security Report
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
-            const comment = fs.readFileSync('pr_security_review.md', 'utf8');
-            
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number
-            });
-            
-            const botComment = comments.find(c => c.body.includes('AI Security Review'));
-            
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: comment
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: comment
-              });
-            }
-
-  ai-inline-review:
-    name: AI Inline Code Comments
-    runs-on: ubuntu-latest
-    needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
-    if: github.event_name == 'pull_request'
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          name: ai-security-analysis-report
+          path: AI_SECURITY_REPORT.md
       
-      - name: Download SARIF files
-        uses: actions/download-artifact@v4
-        with:
-          path: sarif-results
-      
-      - name: Install dependencies
-        run: pip install anthropic
-      
-      - name: Create inline comments script
+      - name: Display Report Summary
+        if: always()
         run: |
-          cat > inline.py << 'EOF'
-          import anthropic
-          import os
-          import json
-          import glob
-          from time import sleep
-          
-          api_key = os.environ.get("ANTHROPIC_API_KEY")
-          if not api_key:
-              print("No API key")
-              with open('review_comments.json', 'w') as f:
-                  json.dump([], f)
-              exit(0)
-          
-          client = anthropic.Anthropic(api_key=api_key)
-          
-          review_comments = []
-          processed = 0
-          max_comments = 15
-          
-          for sarif_file in glob.glob("sarif-results/**/*.sarif", recursive=True):
-              if processed >= max_comments: break
-              try:
-                  with open(sarif_file) as f:
-                      data = json.load(f)
-                      tool = data['runs'][0]['tool']['driver']['name']
-                      
-                      for result in data['runs'][0].get('results', []):
-                          if processed >= max_comments: break
-                          
-                          rule_id = result.get('ruleId', 'unknown')
-                          message = result.get('message', {}).get('text', '')
-                          level = result.get('level', 'warning')
-                          
-                          location = result.get('locations', [{}])[0]
-                          phys_loc = location.get('physicalLocation', {})
-                          file_path = phys_loc.get('artifactLocation', {}).get('uri', '')
-                          line = phys_loc.get('region', {}).get('startLine', 1)
-                          
-                          if not file_path or line < 1: continue
-                          if level not in ['error', 'warning']: continue
-                          
-                          prompt = "Security alert: " + tool + " - " + rule_id + "\n" + message + "\n\nIn 1-2 sentences: Real issue or false positive? How to fix?"
-                          
-                          try:
-                              ai_msg = client.messages.create(
-                                  model="claude-3-7-sonnet-20250219",
-                                  max_tokens=200,
-                                  messages=[{"role": "user", "content": prompt}]
-                              )
-                              
-                              analysis = ai_msg.content[0].text
-                              emoji = "🔴" if level == "error" else "🟠"
-                              
-                              review_comments.append({
-                                  "path": file_path,
-                                  "line": line,
-                                  "body": emoji + " **" + tool + "** - `" + rule_id + "`\n\n" + analysis + "\n\n*AI analysis*"
-                              })
-                              
-                              processed += 1
-                              print("Comment " + str(processed))
-                              sleep(1.5)
-                          except: pass
-              except: pass
-          
-          with open('review_comments.json', 'w') as f:
-              json.dump(review_comments, f)
-          
-          print("Created " + str(len(review_comments)) + " comments")
-          EOF
-      
-      - name: Run inline analysis
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python3 inline.py
-      
-      - name: Post Inline Comments
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const comments = JSON.parse(fs.readFileSync('review_comments.json', 'utf8'));
-            
-            for (const comment of comments) {
-              try {
-                await github.rest.pulls.createReviewComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.issue.number,
-                  body: comment.body,
-                  path: comment.path,
-                  line: comment.line,
-                  commit_id: context.payload.pull_request.head.sha
-                });
-              } catch (error) {
-                console.log('Failed: ' + error.message);
-              }
-            }
+          echo "=========================================="
+          echo "AI SECURITY ANALYSIS COMPLETE"
+          echo "=========================================="
+          echo ""
+          echo "Download the full report from the Artifacts section"
+          echo ""
+          if [ -f AI_SECURITY_REPORT.md ]; then
+            head -50 AI_SECURITY_REPORT.md
+          fi
