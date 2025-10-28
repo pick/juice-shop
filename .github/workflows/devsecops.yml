@@ -1,219 +1,159 @@
-name: DevSecOps Pipeline
-
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  schedule:
-    - cron: '30 1 * * 0'
-
-permissions:
-  contents: read
-  packages: write
-  security-events: write
-
-jobs:
-  tms-scan:
-    name: 2MS Secret Scan
+  ai-sarif-analyzer:
+    name: AI-Powered SARIF Analysis
     runs-on: ubuntu-latest
+    needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
+    if: always()
     permissions:
       contents: read
       security-events: write
-      actions: read
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       
-      - name: Run 2MS and save output
-        continue-on-error: true
-        run: |
-          mkdir -p results
-          chmod 777 results
-          
-          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --stdout-format json > results/2ms-raw.txt || true
-          
-          # Remove log lines, keep only JSON (starts with {)
-          grep -A 999999 '^{' results/2ms-raw.txt > results/2ms-clean.json || echo '{"results":{}}' > results/2ms-clean.json
-          
-          echo "Cleaned JSON output:"
-          cat results/2ms-clean.json
+      - name: Download all SARIF results
+        uses: actions/download-artifact@v4
       
-      - name: Convert to SARIF
+      - name: Install AI Analysis Tools
         run: |
-          cat > convert.py << 'EOF'
+          pip install anthropic jq
+      
+      - name: Aggregate and Analyze Findings
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cat > intelligent_analysis.py << 'EOF'
+          import anthropic
+          import os
           import json
+          import glob
+          from collections import defaultdict
           
-          sarif = {
-              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-              "version": "2.1.0",
-              "runs": [{
-                  "tool": {
-                      "driver": {
-                          "name": "2MS",
-                          "informationUri": "https://checkmarx.com/product/2ms/",
-                          "version": "2.8.1",
-                          "rules": []
-                      }
-                  },
-                  "results": []
-              }]
-          }
+          client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
           
-          try:
-              with open('results/2ms-clean.json', 'r') as f:
-                  data = json.load(f)
-                  
-                  results = data.get('results', {})
-                  
-                  for commit_hash, findings in results.items():
-                      for finding in findings:
-                          rule_id = finding.get('ruleId', 'secret-detected')
-                          source = finding.get('source', 'unknown')
-                          start_line = finding.get('startLine', 1)
-                          value = finding.get('value', 'redacted')
+          # Aggregate all findings
+          all_findings = defaultdict(list)
+          severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+          
+          for sarif_file in glob.glob("**/*.sarif", recursive=True):
+              try:
+                  with open(sarif_file, 'r') as f:
+                      data = json.load(f)
+                      tool = data['runs'][0]['tool']['driver']['name']
+                      results = data['runs'][0].get('results', [])
+                      
+                      for result in results:
+                          rule_id = result.get('ruleId', 'unknown')
+                          message = result.get('message', {}).get('text', '')
+                          level = result.get('level', 'warning')
                           
-                          # Extract file path from source
-                          file_path = source.split(':')[-1] if ':' in source else 'unknown'
+                          location = result.get('locations', [{}])[0]
+                          file_path = location.get('physicalLocation', {}).get('artifactLocation', {}).get('uri', 'unknown')
                           
-                          # Add rule if not exists
-                          if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
-                              sarif['runs'][0]['tool']['driver']['rules'].append({
-                                  "id": rule_id,
-                                  "name": rule_id,
-                                  "shortDescription": {"text": f"Detected {rule_id}"},
-                                  "defaultConfiguration": {"level": "warning"}
-                              })
-                          
-                          # Add result
-                          sarif['runs'][0]['results'].append({
-                              "ruleId": rule_id,
-                              "message": {"text": f"Found {rule_id} in {file_path}"},
-                              "locations": [{
-                                  "physicalLocation": {
-                                      "artifactLocation": {"uri": file_path},
-                                      "region": {"startLine": max(1, start_line)}
-                                  }
-                              }],
-                              "level": "warning"
+                          all_findings[tool].append({
+                              'rule': rule_id,
+                              'message': message,
+                              'severity': level,
+                              'file': file_path
                           })
-                  
-                  print(f"✅ Converted {len(sarif['runs'][0]['results'])} findings to SARIF")
-                  
-          except Exception as e:
-              print(f"Error: {e}")
-              import traceback
-              traceback.print_exc()
+                          
+                          # Count severities
+                          if 'error' in level or 'critical' in level.lower():
+                              severity_counts['critical'] += 1
+                          elif 'warning' in level or 'high' in level.lower():
+                              severity_counts['high'] += 1
+                          else:
+                              severity_counts['medium'] += 1
+              except Exception as e:
+                  print(f"Error processing {sarif_file}: {e}")
           
-          with open('2ms-results.sarif', 'w') as f:
-              json.dump(sarif, f, indent=2)
+          # Prepare summary for AI
+          summary = f"""
+          ## Security Scan Summary
+          
+          **Total Findings by Tool:**
+          {json.dumps({tool: len(findings) for tool, findings in all_findings.items()}, indent=2)}
+          
+          **Severity Distribution:**
+          - Critical: {severity_counts['critical']}
+          - High: {severity_counts['high']}
+          - Medium: {severity_counts['medium']}
+          - Low: {severity_counts['low']}
+          
+          **Sample Findings (first 10):**
+          {json.dumps(list(all_findings.values())[0][:10] if all_findings else [], indent=2)}
+          """
+          
+          prompt = f"""{summary}
+
+As an expert security analyst, provide:
+
+1. **Executive Summary** (2-3 sentences on overall security posture)
+2. **Priority Fixes** (Top 5 issues to address immediately with clear reasoning)
+3. **Risk Score** (1-10 scale with justification)
+4. **False Positive Assessment** (Identify potential false positives)
+5. **Remediation Roadmap** (30/60/90 day plan)
+6. **Best Practices** (3 recommendations for this codebase)
+
+Be specific, actionable, and interview-ready."""
+          
+          message = client.messages.create(
+              model="claude-3-5-sonnet-20241022",
+              max_tokens=3000,
+              messages=[{"role": "user", "content": prompt}]
+          )
+          
+          analysis = message.content[0].text
+          
+          # Generate markdown report
+          report = f"""# 🛡️ AI-Powered Security Analysis Report
+          
+{analysis}
+
+---
+
+## Detailed Findings
+
+**Total Issues:** {sum(len(f) for f in all_findings.values())}
+
+### By Tool:
+{chr(10).join([f"- **{tool}**: {len(findings)} findings" for tool, findings in all_findings.items()])}
+
+### Severity Breakdown:
+- 🔴 Critical: {severity_counts['critical']}
+- 🟠 High: {severity_counts['high']}
+- 🟡 Medium: {severity_counts['medium']}
+- 🟢 Low: {severity_counts['low']}
+
+---
+*Report generated by Claude AI | {tool} integration*
+"""
+          
+          with open('AI_SECURITY_REPORT.md', 'w') as f:
+              f.write(report)
+          
+          print(report)
           EOF
           
-          python3 convert.py
+          python intelligent_analysis.py
       
-      - name: Upload 2MS SARIF to Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
         with:
-          sarif_file: 2ms-results.sarif
-          category: 2ms
-
-  build-and-push:
-    name: Build and Push to GHCR
-    runs-on: ubuntu-latest
-    needs: tms-scan
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('AI_SECURITY_REPORT.md', 'utf8');
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
       
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Upload AI Report
+        uses: actions/upload-artifact@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-
-  semgrep-scan:
-    name: Semgrep SAST Scan
-    runs-on: ubuntu-latest
-    needs: tms-scan
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    container:
-      image: returntocorp/semgrep
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Run Semgrep
-        run: semgrep scan --sarif --output semgrep.sarif
-      
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-
-  trivy-scan:
-    name: Trivy Container Scan
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Run Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'ghcr.io/${{ github.repository }}:latest'
-          format: 'sarif'
-          output: 'trivy.sarif'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-      
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy.sarif'
-
-  codeql:
-    name: CodeQL SAST Scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: 'javascript'
-          queries: security-extended
-      
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+          name: ai-security-report
+          path: AI_SECURITY_REPORT.md
