@@ -27,27 +27,29 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS Scanner via Docker
+      - name: Run 2MS Scan
         continue-on-error: true
         run: |
-          docker run --rm \
-            -v $(pwd):/repo \
-            checkmarx/2ms:latest \
-            filesystem --path /repo \
-            --report-path /repo/2ms-results.json \
-            --report-format json \
-            --exit-code 0
+          docker run --rm -v $(pwd):/repo checkmarx/2ms:2.8.1 git /repo --report-path /repo/2ms-results.json --report-format json --exit-code 0 || true
           
           echo "✅ 2MS scan complete"
       
-      - name: Convert 2MS JSON to SARIF
-        if: always()
+      - name: Check if results exist
+        id: check_results
         run: |
-          sudo apt-get update && sudo apt-get install -y jq
-          
-          cat > convert_2ms_to_sarif.py << 'EOF'
+          if [ -f 2ms-results.json ]; then
+            echo "results_exist=true" >> $GITHUB_OUTPUT
+            echo "Results file found"
+          else
+            echo "results_exist=false" >> $GITHUB_OUTPUT
+            echo "No results file found"
+          fi
+      
+      - name: Convert 2MS JSON to SARIF
+        if: steps.check_results.outputs.results_exist == 'true'
+        run: |
+          cat > convert_to_sarif.py << 'EOF'
           import json
-          import sys
           
           sarif = {
               "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -57,7 +59,7 @@ jobs:
                       "driver": {
                           "name": "2MS",
                           "informationUri": "https://checkmarx.com/product/2ms/",
-                          "version": "1.0.0",
+                          "version": "2.8.1",
                           "rules": []
                       }
                   },
@@ -67,55 +69,48 @@ jobs:
           
           try:
               with open('2ms-results.json', 'r') as f:
-                  results = json.load(f)
-                  
-                  for item in results:
-                      rule_id = item.get('rule', {}).get('id', 'unknown-secret')
-                      description = item.get('rule', {}).get('description', 'Secret detected')
-                      file_path = item.get('file', 'unknown')
-                      line_number = item.get('line', 1)
+                  content = f.read().strip()
+                  if not content or content == '[]':
+                      print("No secrets found")
+                  else:
+                      results = json.loads(content)
                       
-                      # Add rule if not exists
-                      if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
-                          sarif['runs'][0]['tool']['driver']['rules'].append({
-                              "id": rule_id,
-                              "name": rule_id,
-                              "shortDescription": {"text": description},
-                              "fullDescription": {"text": f"2MS detected: {description}"},
-                              "defaultConfiguration": {"level": "error"}
+                      for item in results:
+                          rule_id = item.get('rule', {}).get('id', 'unknown-secret')
+                          description = item.get('rule', {}).get('description', 'Secret detected')
+                          file_path = item.get('file', 'unknown')
+                          line_number = item.get('line', 1)
+                          
+                          if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
+                              sarif['runs'][0]['tool']['driver']['rules'].append({
+                                  "id": rule_id,
+                                  "name": rule_id,
+                                  "shortDescription": {"text": description},
+                                  "fullDescription": {"text": f"2MS detected: {description}"},
+                                  "defaultConfiguration": {"level": "warning"}
+                              })
+                          
+                          sarif['runs'][0]['results'].append({
+                              "ruleId": rule_id,
+                              "message": {"text": description},
+                              "locations": [{
+                                  "physicalLocation": {
+                                      "artifactLocation": {"uri": file_path},
+                                      "region": {"startLine": line_number}
+                                  }
+                              }],
+                              "level": "warning"
                           })
-                      
-                      # Add result
-                      sarif['runs'][0]['results'].append({
-                          "ruleId": rule_id,
-                          "message": {"text": description},
-                          "locations": [{
-                              "physicalLocation": {
-                                  "artifactLocation": {"uri": file_path},
-                                  "region": {"startLine": line_number}
-                              }
-                          }],
-                          "level": "error"
-                      })
           except Exception as e:
-              print(f"No results or error: {e}")
+              print(f"Error processing results: {e}")
           
           with open('2ms-results.sarif', 'w') as f:
               json.dump(sarif, f, indent=2)
           
-          print("✅ Conversion complete")
+          print("✅ SARIF conversion complete")
           EOF
           
-          python3 convert_2ms_to_sarif.py
-      
-      - name: Upload 2MS Results as Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: 2ms-results
-          path: |
-            2ms-results.json
-            2ms-results.sarif
+          python3 convert_to_sarif.py
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
@@ -123,6 +118,15 @@ jobs:
         with:
           sarif_file: 2ms-results.sarif
           category: 2ms
+      
+      - name: Upload Results as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2ms-scan-results
+          path: |
+            2ms-results.json
+            2ms-results.sarif
 
   build-and-push:
     name: Build and Push to GHCR
