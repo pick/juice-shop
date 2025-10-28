@@ -222,7 +222,7 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-  ai-comprehensive-analysis:
+    ai-comprehensive-analysis:
     name: AI Security Report
     runs-on: ubuntu-latest
     needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
@@ -257,12 +257,7 @@ jobs:
           api_key = os.environ.get("ANTHROPIC_API_KEY")
           if not api_key:
               print("WARNING: ANTHROPIC_API_KEY not set. Skipping AI analysis.")
-              report = """# AI-Powered Security Analysis Report
-          
-          ## Setup Required
-          
-          To enable AI-powered analysis, add ANTHROPIC_API_KEY to GitHub Secrets.
-          """
+              report = "AI-Powered Security Analysis Report\n\nSetup Required\n\nTo enable AI-powered analysis, add ANTHROPIC_API_KEY to GitHub Secrets."
               with open('AI_SECURITY_REPORT.md', 'w') as f:
                   f.write(report)
               exit(0)
@@ -308,30 +303,32 @@ jobs:
           
           summary = f"""Security Scan Summary
           
-          Total Findings by Tool:
-          {tools_summary}
-          
-          Severity Distribution:
-          - Critical: {severity_counts['critical']}
-          - High: {severity_counts['high']}
-          - Medium: {severity_counts['medium']}
-          - Low: {severity_counts['low']}
-          
-          Sample Findings (first 5):
-          {sample_findings}
-          """
-          
-          prompt = f"""{summary}
+Total Findings by Tool:
+{tools_summary}
 
-As an expert security analyst, provide:
-1. Executive Summary (2-3 sentences on overall security posture)
-2. Priority Fixes (Top 5 issues to address immediately with clear reasoning)
-3. Risk Score (1-10 scale with justification)
-4. False Positive Assessment (Identify potential false positives)
-5. Remediation Roadmap (30/60/90 day plan)
-6. Best Practices (3 recommendations for this codebase)
+Severity Distribution:
+- Critical: {severity_counts['critical']}
+- High: {severity_counts['high']}
+- Medium: {severity_counts['medium']}
+- Low: {severity_counts['low']}
 
-Be specific, actionable, and interview-ready."""
+Sample Findings (first 5):
+{sample_findings}
+"""
+          
+          prompt = """Analyze the security scan results and provide:
+
+Executive Summary - 2-3 sentences on overall security posture
+Priority Fixes - Top 5 issues to address immediately with clear reasoning
+Risk Score - 1-10 scale with justification
+False Positive Assessment - Identify potential false positives
+Remediation Roadmap - 30/60/90 day plan
+Best Practices - 3 recommendations for this codebase
+
+Be specific, actionable, and interview-ready.
+
+Here are the results:
+""" + summary
           
           message = client.messages.create(
               model="claude-3-7-sonnet-20250219",
@@ -344,7 +341,7 @@ Be specific, actionable, and interview-ready."""
           tools_list = '\n'.join([f"- **{tool}**: {len(findings)} findings" for tool, findings in all_findings.items()])
           
           report = f"""# AI-Powered Security Analysis Report
-          
+
 {analysis}
 
 ---
