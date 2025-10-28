@@ -222,149 +222,6 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-  ai-comprehensive-analysis:
-    name: AI Security Report
-    runs-on: ubuntu-latest
-    needs: [semgrep-scan, trivy-scan, codeql, tms-scan]
-    if: always()
-    permissions:
-      contents: read
-      security-events: write
-      pull-requests: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Download all SARIF results
-        uses: actions/download-artifact@v4
-        with:
-          path: sarif-results
-      
-      - name: Install AI Analysis Tools
-        run: pip install anthropic
-      
-      - name: Generate Comprehensive Security Report
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          python3 << 'PYEOF'
-          import anthropic
-          import os
-          import json
-          import glob
-          from collections import defaultdict
-          
-          api_key = os.environ.get("ANTHROPIC_API_KEY")
-          if not api_key:
-              print("WARNING: ANTHROPIC_API_KEY not set")
-              report = "AI-Powered Security Analysis Report\n\nSetup Required"
-              with open('AI_SECURITY_REPORT.md', 'w') as f:
-                  f.write(report)
-              exit(0)
-          
-          client = anthropic.Anthropic(api_key=api_key)
-          
-          all_findings = defaultdict(list)
-          severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-          
-          for sarif_file in glob.glob("sarif-results/**/*.sarif", recursive=True):
-              try:
-                  with open(sarif_file, 'r') as f:
-                      data = json.load(f)
-                      tool = data['runs'][0]['tool']['driver']['name']
-                      results = data['runs'][0].get('results', [])
-                      
-                      for result in results:
-                          rule_id = result.get('ruleId', 'unknown')
-                          message = result.get('message', {}).get('text', '')
-                          level = result.get('level', 'warning')
-                          
-                          location = result.get('locations', [{}])[0]
-                          file_path = location.get('physicalLocation', {}).get('artifactLocation', {}).get('uri', 'unknown')
-                          
-                          all_findings[tool].append({
-                              'rule': rule_id,
-                              'message': message,
-                              'severity': level,
-                              'file': file_path
-                          })
-                          
-                          if 'error' in level or 'critical' in level.lower():
-                              severity_counts['critical'] += 1
-                          elif 'warning' in level or 'high' in level.lower():
-                              severity_counts['high'] += 1
-                          else:
-                              severity_counts['medium'] += 1
-              except Exception as e:
-                  print("Error: " + str(e))
-          
-          tools_summary = json.dumps({tool: len(findings) for tool, findings in all_findings.items()}, indent=2)
-          sample_findings = json.dumps(list(all_findings.values())[0][:5] if all_findings else [], indent=2)
-          
-          summary_text = "Security Scan Summary\n\n"
-          summary_text += "Total Findings by Tool:\n" + tools_summary + "\n\n"
-          summary_text += "Severity Distribution:\n"
-          summary_text += "- Critical: " + str(severity_counts['critical']) + "\n"
-          summary_text += "- High: " + str(severity_counts['high']) + "\n"
-          summary_text += "- Medium: " + str(severity_counts['medium']) + "\n"
-          summary_text += "- Low: " + str(severity_counts['low']) + "\n\n"
-          summary_text += "Sample Findings:\n" + sample_findings
-          
-          prompt_instruction = """Analyze the security scan results and provide:
-
-Executive Summary - 2-3 sentences on overall security posture
-Priority Fixes - Top 5 issues to address immediately
-Risk Score - 1-10 scale with justification
-False Positive Assessment - Identify potential false positives
-Remediation Roadmap - 30/60/90 day plan
-Best Practices - 3 recommendations
-
-Be specific and actionable.
-
-Results:
-"""
-          
-          full_prompt = prompt_instruction + summary_text
-          
-          message = client.messages.create(
-              model="claude-3-7-sonnet-20250219",
-              max_tokens=3000,
-              messages=[{"role": "user", "content": full_prompt}]
-          )
-          
-          analysis = message.content[0].text
-          
-          tools_list = ""
-          for tool, findings in all_findings.items():
-              tools_list += "- " + tool + ": " + str(len(findings)) + " findings\n"
-          
-          total_issues = sum(len(f) for f in all_findings.values())
-          
-          report = "# AI-Powered Security Analysis Report\n\n"
-          report += analysis + "\n\n---\n\n"
-          report += "## Detailed Findings\n\n"
-          report += "Total Issues: " + str(total_issues) + "\n\n"
-          report += "### By Tool:\n" + tools_list + "\n"
-          report += "### Severity Breakdown:\n"
-          report += "- Critical: " + str(severity_counts['critical']) + "\n"
-          report += "- High: " + str(severity_counts['high']) + "\n"
-          report += "- Medium: " + str(severity_counts['medium']) + "\n"
-          report += "- Low: " + str(severity_counts['low']) + "\n\n"
-          report += "---\n*Report generated by Claude 3.7 Sonnet*\n"
-          
-          with open('AI_SECURITY_REPORT.md', 'w') as f:
-              f.write(report)
-          
-          print(report)
-          PYEOF
-      
-      - name: Upload Comprehensive Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-security-report
-          path: AI_SECURITY_REPORT.md
-
   ai-pr-review:
     name: AI PR Security Review
     runs-on: ubuntu-latest
@@ -386,11 +243,9 @@ Results:
       - name: Install dependencies
         run: pip install anthropic
       
-      - name: Generate PR Security Review
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Create AI analysis script
         run: |
-          python3 << 'PYEOF'
+          cat > analyze.py << 'EOF'
           import anthropic
           import os
           import json
@@ -399,6 +254,8 @@ Results:
           api_key = os.environ.get("ANTHROPIC_API_KEY")
           if not api_key:
               print("No API key")
+              with open('pr_security_review.md', 'w') as f:
+                  f.write("AI Security Review\n\nAPI key not configured")
               exit(0)
           
           client = anthropic.Anthropic(api_key=api_key)
@@ -446,24 +303,16 @@ Results:
           high_json = json.dumps(high_alerts[:5], indent=2)
           tools_list = ', '.join(all_tools)
           
-          summary = "Security Scan Results for this PR\n\n"
-          summary += "Critical Issues: " + str(len(critical_alerts)) + "\n"
+          summary = "Security Scan Results\n\n"
+          summary += "Critical: " + str(len(critical_alerts)) + "\n"
           summary += critical_json + "\n\n"
-          summary += "High Severity Issues: " + str(len(high_alerts)) + "\n"
+          summary += "High: " + str(len(high_alerts)) + "\n"
           summary += high_json + "\n\n"
-          summary += "Medium Severity Issues: " + str(len(medium_alerts)) + "\n\n"
-          summary += "Total alerts: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n"
-          summary += "Tools used: " + tools_list
+          summary += "Medium: " + str(len(medium_alerts)) + "\n"
+          summary += "Total: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n"
+          summary += "Tools: " + tools_list
           
-          prompt = summary + """\n\nAs a senior security engineer, provide:
-
-Executive Summary - 2 sentences, should this PR be merged?
-Must-Fix Before Merge - Top 3 critical issues with file:line or None
-Recommended Fixes - Top 3 high-priority issues
-False Positive Assessment - Which alerts to ignore and why
-Merge Recommendation - Approve / Approve with changes / Request changes
-
-Be concise and specific."""
+          prompt = summary + "\n\nProvide a security review with: Executive Summary, Must-Fix items, Recommendations, False Positives, and Merge decision."
           
           message = client.messages.create(
               model="claude-3-7-sonnet-20250219",
@@ -476,22 +325,23 @@ Be concise and specific."""
           pr_comment = "## AI Security Review\n\n"
           pr_comment += analysis + "\n\n---\n\n"
           pr_comment += "### Scan Summary\n"
-          pr_comment += "- Critical Issues: " + str(len(critical_alerts)) + "\n"
-          pr_comment += "- High Severity: " + str(len(high_alerts)) + "\n"
-          pr_comment += "- Medium Severity: " + str(len(medium_alerts)) + "\n"
-          pr_comment += "- Total Alerts: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n\n"
-          pr_comment += "### Security Tools Used\n"
-          pr_comment += "- CodeQL - Deep SAST analysis\n"
-          pr_comment += "- Semgrep - Pattern-based SAST\n"
-          pr_comment += "- Trivy - Container scanning\n"
-          pr_comment += "- 2MS - Secret detection\n\n"
-          pr_comment += "---\n*AI-powered analysis by Claude 3.7 Sonnet*\n"
+          pr_comment += "- Critical: " + str(len(critical_alerts)) + "\n"
+          pr_comment += "- High: " + str(len(high_alerts)) + "\n"
+          pr_comment += "- Medium: " + str(len(medium_alerts)) + "\n"
+          pr_comment += "- Total: " + str(len(critical_alerts) + len(high_alerts) + len(medium_alerts)) + "\n\n"
+          pr_comment += "### Tools: CodeQL, Semgrep, Trivy, 2MS\n\n"
+          pr_comment += "---\n*AI analysis by Claude 3.7*\n"
           
           with open('pr_security_review.md', 'w') as f:
               f.write(pr_comment)
           
           print(pr_comment)
-          PYEOF
+          EOF
+      
+      - name: Run AI analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 analyze.py
       
       - name: Post PR Review Comment
         uses: actions/github-script@v7
@@ -544,11 +394,9 @@ Be concise and specific."""
       - name: Install dependencies
         run: pip install anthropic
       
-      - name: Create Inline PR Comments
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Create inline comments script
         run: |
-          python3 << 'PYEOF'
+          cat > inline.py << 'EOF'
           import anthropic
           import os
           import json
@@ -569,17 +417,14 @@ Be concise and specific."""
           max_comments = 15
           
           for sarif_file in glob.glob("sarif-results/**/*.sarif", recursive=True):
-              if processed >= max_comments:
-                  break
-                  
+              if processed >= max_comments: break
               try:
                   with open(sarif_file) as f:
                       data = json.load(f)
                       tool = data['runs'][0]['tool']['driver']['name']
                       
                       for result in data['runs'][0].get('results', []):
-                          if processed >= max_comments:
-                              break
+                          if processed >= max_comments: break
                           
                           rule_id = result.get('ruleId', 'unknown')
                           message = result.get('message', {}).get('text', '')
@@ -590,16 +435,10 @@ Be concise and specific."""
                           file_path = phys_loc.get('artifactLocation', {}).get('uri', '')
                           line = phys_loc.get('region', {}).get('startLine', 1)
                           
-                          if not file_path or line < 1:
-                              continue
+                          if not file_path or line < 1: continue
+                          if level not in ['error', 'warning']: continue
                           
-                          if level not in ['error', 'warning']:
-                              continue
-                          
-                          prompt = "Security alert from " + tool + "\n"
-                          prompt += "Rule: " + rule_id + "\n"
-                          prompt += "Issue: " + message + "\n\n"
-                          prompt += "In 1-2 sentences: Is this real or false positive? If real, how to fix?"
+                          prompt = "Security alert: " + tool + " - " + rule_id + "\n" + message + "\n\nIn 1-2 sentences: Real issue or false positive? How to fix?"
                           
                           try:
                               ai_msg = client.messages.create(
@@ -609,35 +448,30 @@ Be concise and specific."""
                               )
                               
                               analysis = ai_msg.content[0].text
-                              
-                              severity_emoji = "🔴" if level == "error" else "🟠"
-                              
-                              comment_body = severity_emoji + " **" + tool + "** - `" + rule_id + "`\n\n"
-                              comment_body += analysis + "\n\n*AI-assisted analysis*"
+                              emoji = "🔴" if level == "error" else "🟠"
                               
                               review_comments.append({
                                   "path": file_path,
                                   "line": line,
-                                  "body": comment_body
+                                  "body": emoji + " **" + tool + "** - `" + rule_id + "`\n\n" + analysis + "\n\n*AI analysis*"
                               })
                               
                               processed += 1
-                              print("Generated comment " + str(processed) + "/" + str(max_comments))
-                              
+                              print("Comment " + str(processed))
                               sleep(1.5)
-                              
-                          except Exception as e:
-                              print("Error: " + str(e))
-                              continue
-                              
-              except Exception as e:
-                  print("Error processing file: " + str(e))
+                          except: pass
+              except: pass
           
           with open('review_comments.json', 'w') as f:
               json.dump(review_comments, f)
           
-          print("Created " + str(len(review_comments)) + " inline comments")
-          PYEOF
+          print("Created " + str(len(review_comments)) + " comments")
+          EOF
+      
+      - name: Run inline analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 inline.py
       
       - name: Post Inline Comments
         uses: actions/github-script@v7
@@ -645,8 +479,6 @@ Be concise and specific."""
           script: |
             const fs = require('fs');
             const comments = JSON.parse(fs.readFileSync('review_comments.json', 'utf8'));
-            
-            console.log(`Posting ${comments.length} inline comments`);
             
             for (const comment of comments) {
               try {
@@ -659,8 +491,7 @@ Be concise and specific."""
                   line: comment.line,
                   commit_id: context.payload.pull_request.head.sha
                 });
-                console.log(`✓ Commented on ${comment.path}:${comment.line}`);
               } catch (error) {
-                console.log(`✗ Failed: ${error.message}`);
+                console.log('Failed: ' + error.message);
               }
             }
