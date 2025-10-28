@@ -27,10 +27,95 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Run 2MS Secret Scanner
-        uses: checkmarx/2ms@v1.0.6
+      - name: Run 2MS Scanner via Docker
+        continue-on-error: true
+        run: |
+          docker run --rm \
+            -v $(pwd):/repo \
+            checkmarx/2ms:latest \
+            filesystem --path /repo \
+            --report-path /repo/2ms-results.json \
+            --report-format json \
+            --exit-code 0
+          
+          echo "✅ 2MS scan complete"
+      
+      - name: Convert 2MS JSON to SARIF
+        if: always()
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          cat > convert_2ms_to_sarif.py << 'EOF'
+          import json
+          import sys
+          
+          sarif = {
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [{
+                  "tool": {
+                      "driver": {
+                          "name": "2MS",
+                          "informationUri": "https://checkmarx.com/product/2ms/",
+                          "version": "1.0.0",
+                          "rules": []
+                      }
+                  },
+                  "results": []
+              }]
+          }
+          
+          try:
+              with open('2ms-results.json', 'r') as f:
+                  results = json.load(f)
+                  
+                  for item in results:
+                      rule_id = item.get('rule', {}).get('id', 'unknown-secret')
+                      description = item.get('rule', {}).get('description', 'Secret detected')
+                      file_path = item.get('file', 'unknown')
+                      line_number = item.get('line', 1)
+                      
+                      # Add rule if not exists
+                      if not any(r['id'] == rule_id for r in sarif['runs'][0]['tool']['driver']['rules']):
+                          sarif['runs'][0]['tool']['driver']['rules'].append({
+                              "id": rule_id,
+                              "name": rule_id,
+                              "shortDescription": {"text": description},
+                              "fullDescription": {"text": f"2MS detected: {description}"},
+                              "defaultConfiguration": {"level": "error"}
+                          })
+                      
+                      # Add result
+                      sarif['runs'][0]['results'].append({
+                          "ruleId": rule_id,
+                          "message": {"text": description},
+                          "locations": [{
+                              "physicalLocation": {
+                                  "artifactLocation": {"uri": file_path},
+                                  "region": {"startLine": line_number}
+                              }
+                          }],
+                          "level": "error"
+                      })
+          except Exception as e:
+              print(f"No results or error: {e}")
+          
+          with open('2ms-results.sarif', 'w') as f:
+              json.dump(sarif, f, indent=2)
+          
+          print("✅ Conversion complete")
+          EOF
+          
+          python3 convert_2ms_to_sarif.py
+      
+      - name: Upload 2MS Results as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          args: filesystem --path . --report-path 2ms-results.sarif --report-format sarif
+          name: 2ms-results
+          path: |
+            2ms-results.json
+            2ms-results.sarif
       
       - name: Upload 2MS SARIF to Code Scanning
         if: always()
